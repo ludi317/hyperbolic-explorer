@@ -40,6 +40,29 @@ fn tile_radii() -> (f32, f32) {
     (inradius, circumradius)
 }
 
+/// Inradius (center → edge midpoint) of a tile.
+pub fn inradius() -> f32 {
+    tile_radii().0
+}
+
+/// The four order-2 rotations about the origin tile's edge midpoints. Each maps
+/// the origin tile to an edge-neighbor and is a symmetry of the {4,5} tiling, so
+/// left-multiplying the player's frame by one "teleports" them exactly one tile
+/// back toward the origin with no visible change. This is what keeps walking
+/// endless on a finite baked patch: whenever the player leaves the center tile we
+/// snap them back, so the patch always surrounds them. Each is its own inverse.
+pub fn recenter_generators() -> Vec<Mat4> {
+    let i = inradius();
+    // π-rotation about the +x edge midpoint (distance `i` along +x).
+    let about_edge0 = h::boost_x(i) * h::rot_y(PI) * h::boost_x(-i);
+    (0..P)
+        .map(|k| {
+            let a = k as f32 * 2.0 * PI / P as f32;
+            h::rot_y(a) * about_edge0 * h::rot_y(-a)
+        })
+        .collect()
+}
+
 /// All the tile transforms (Lorentz matrices mapping the fundamental tile to
 /// each tile), discovered by reflecting across tile edges. Each returned value
 /// is `(transform, ring)` where `ring` is the BFS depth (used for coloring).
@@ -281,4 +304,45 @@ fn add_pillar(b: &mut MeshBuilder, m: Mat4) {
     }
     // Top cap.
     b.polygon(&top, cap);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recentering must pull a player who has walked far away back into the
+    /// central tile, so a finite baked patch always surrounds them.
+    #[test]
+    fn recenter_returns_to_center() {
+        let gens = recenter_generators();
+        let circumradius = tile_radii().1;
+        // Start 10 units away in an awkward diagonal direction.
+        let mut frame = h::boost_z(7.0) * h::boost_x(5.0);
+
+        for _ in 0..1000 {
+            let cur = (frame * h::origin()).w;
+            let mut best = cur;
+            let mut best_g: Option<Mat4> = None;
+            for g in &gens {
+                let w = (*g * frame * h::origin()).w;
+                if w < best - 1e-4 {
+                    best = w;
+                    best_g = Some(*g);
+                }
+            }
+            match best_g {
+                Some(g) => frame = g * frame,
+                None => break,
+            }
+        }
+
+        // The player should now sit inside the origin tile: w = cosh(distance)
+        // is at most cosh(circumradius).
+        let w = (frame * h::origin()).w;
+        assert!(
+            w <= circumradius.cosh() + 1e-3,
+            "still w={w} (> cosh(circumradius)={})",
+            circumradius.cosh()
+        );
+    }
 }
