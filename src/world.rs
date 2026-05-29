@@ -30,6 +30,15 @@ const PILLAR_HEIGHT: f32 = 0.9;
 /// Half-size (circumradius) of a pillar's square cross-section.
 const PILLAR_RADIUS: f32 = 0.14;
 
+// Shared palette. Every tile is shaded identically (light center, dark rim) so
+// the floor is homogeneous — a requirement for seamless recentering, since the
+// recentering symmetries can map any tile onto any other.
+const FLOOR_CENTER: [f32; 4] = [0.85, 0.82, 0.70, 1.0];
+const FLOOR_EDGE: [f32; 4] = [0.18, 0.42, 0.54, 1.0];
+const PILLAR_SIDE: [f32; 4] = [0.55, 0.38, 0.30, 1.0];
+const PILLAR_SIDE_DARK: [f32; 4] = [0.40, 0.27, 0.21, 1.0];
+const PILLAR_CAP: [f32; 4] = [0.95, 0.75, 0.45, 1.0];
+
 /// Inradius (center → edge midpoint) and circumradius (center → vertex) of a
 /// regular {P,Q} tile, from the right-triangle relations of the (2,P,Q) triangle.
 fn tile_radii() -> (f32, f32) {
@@ -138,6 +147,26 @@ impl MeshBuilder {
         }
     }
 
+    /// Push a polygon as a fan from an explicit center vertex, with a different
+    /// color at the center than at the rim. Every tile gets the *same* treatment,
+    /// which is what makes recentering seamless: the tiling has no per-tile
+    /// distinction left to flip.
+    fn tile(&mut self, center: Vec4, rim: &[Vec4], c_center: [f32; 4], c_rim: [f32; 4]) {
+        let base = self.positions.len() as u32;
+        self.positions.push([center.x, center.y, center.z]);
+        self.colors.push(c_center);
+        for p in rim {
+            self.positions.push([p.x, p.y, p.z]);
+            self.colors.push(c_rim);
+        }
+        let n = rim.len() as u32;
+        for i in 0..n {
+            let a = base + 1 + i;
+            let b = base + 1 + (i + 1) % n;
+            self.indices.extend_from_slice(&[base, a, b]);
+        }
+    }
+
     fn build(self) -> Mesh {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -150,19 +179,26 @@ impl MeshBuilder {
     }
 }
 
-/// Build the whole world mesh (floor tiles + pillars).
+/// A pure translation (no rotation) mapping the origin to a floor point.
+fn translation_to(p: Vec4) -> Mat4 {
+    let r = p.w.max(1.0).acosh();
+    let theta = p.z.atan2(p.x);
+    h::rot_y(theta) * h::boost_x(r) * h::rot_y(-theta)
+}
+
+/// Build the whole world mesh: a homogeneous {4,5} floor (every tile identical)
+/// plus a pillar at every vertex. Nothing distinguishes one tile from another,
+/// so recentering the player never causes a visible jump.
 pub fn build_world_mesh() -> Mesh {
     let (_, circumradius) = tile_radii();
     let tiles = generate_tiles();
     info!("generated {} hyperbolic tiles", tiles.len());
 
     let mut b = MeshBuilder::new();
+    let mut vertices: Vec<Vec4> = Vec::new();
 
-    // Two-tone checkerboard floor; tile shade keyed on BFS-ring parity.
-    let floor_a = [0.09, 0.34, 0.55, 1.0];
-    let floor_b = [0.80, 0.74, 0.55, 1.0];
-
-    for (m, ring) in &tiles {
+    for (m, _ring) in &tiles {
+        let center = *m * h::origin();
         // Corners of the regular P-gon, at the circumradius.
         let corners: Vec<Vec4> = (0..P)
             .map(|k| {
@@ -171,28 +207,63 @@ pub fn build_world_mesh() -> Mesh {
             })
             .collect();
 
-        let base = if ring % 2 == 0 { floor_a } else { floor_b };
-        b.polygon(&corners, base);
+        // Light center fading to a dark rim gives every tile a visible border
+        // (the "grout" between tiles) without distinguishing tiles from each other.
+        b.tile(center, &corners, FLOOR_CENTER, FLOOR_EDGE);
 
-        // Put a pillar on every other tile so the world has vertical structure
-        // and parallax without becoming a forest. Skip the origin tile so the
-        // player doesn't spawn inside a pillar.
-        if *ring != 0 && ring % 2 == 0 {
-            add_pillar(&mut b, *m);
+        // Record unique vertices for pillar placement.
+        for c in &corners {
+            let cs = c.truncate();
+            if !vertices.iter().any(|v| v.truncate().distance_squared(cs) < 1e-4) {
+                vertices.push(*c);
+            }
         }
+    }
+
+    // A pillar at every vertex (where five tiles meet). Vertices form a single
+    // symmetry orbit, so this is invariant under recentering, and they sit at the
+    // tile corners — clear of the tile centers where the player stands.
+    for v in &vertices {
+        add_pillar(&mut b, translation_to(*v));
     }
 
     b.build()
 }
 
+/// Add an axis-aligned square pillar standing on tile `m`'s center.
+fn add_pillar(b: &mut MeshBuilder, m: Mat4) {
+    // Base square corners on the floor (y = 0), in the tile's local frame.
+    let base_local: Vec<Vec4> = (0..4)
+        .map(|k| {
+            let a = PI / 4.0 + k as f32 * PI / 2.0;
+            h::floor_point(PILLAR_RADIUS, a)
+        })
+        .collect();
+    let lift = h::boost_y(PILLAR_HEIGHT);
+
+    // World-space base and top rings.
+    let base: Vec<Vec4> = base_local.iter().map(|p| m * *p).collect();
+    let top: Vec<Vec4> = base_local.iter().map(|p| m * (lift * *p)).collect();
+
+    // Four side walls.
+    for k in 0..4 {
+        let n = (k + 1) % 4;
+        let quad = [base[k], base[n], top[n], top[k]];
+        let c = if k % 2 == 0 { PILLAR_SIDE } else { PILLAR_SIDE_DARK };
+        b.polygon(&quad, c);
+    }
+    // Top cap.
+    b.polygon(&top, PILLAR_CAP);
+}
+
 // ---------------------------------------------------------------------------
 // Euclidean counterpart: an ordinary flat {4,4} grid (four squares per vertex),
-// for the split-screen comparison. Same tile size, colors, and pillar pattern,
-// but drawn with a normal Bevy camera + StandardMaterial so the *only*
-// difference between the two views is the curvature of space.
+// for the split-screen comparison. Identical per-tile treatment and pillars at
+// every vertex — matching the hyperbolic side — but drawn with a normal Bevy
+// camera + StandardMaterial, so the *only* difference is the curvature of space.
 // ---------------------------------------------------------------------------
 
-const GRID_RADIUS: i32 = 14;
+const GRID_RADIUS: i32 = 16;
 
 fn push_quad(
     pos: &mut Vec<[f32; 3]>,
@@ -212,56 +283,68 @@ fn push_quad(
     idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
+/// One flat square tile, fan-shaded light center to dark rim (matches the
+/// hyperbolic tiles).
+fn push_floor_tile(
+    pos: &mut Vec<[f32; 3]>,
+    nor: &mut Vec<[f32; 3]>,
+    col: &mut Vec<[f32; 4]>,
+    idx: &mut Vec<u32>,
+    cx: f32,
+    cz: f32,
+) {
+    let base = pos.len() as u32;
+    pos.push([cx, 0.0, cz]);
+    nor.push([0.0, 1.0, 0.0]);
+    col.push(FLOOR_CENTER);
+    for (dx, dz) in [(-0.5, -0.5), (-0.5, 0.5), (0.5, 0.5), (0.5, -0.5)] {
+        pos.push([cx + dx, 0.0, cz + dz]);
+        nor.push([0.0, 1.0, 0.0]);
+        col.push(FLOOR_EDGE);
+    }
+    for i in 0..4u32 {
+        idx.extend_from_slice(&[base, base + 1 + i, base + 1 + (i + 1) % 4]);
+    }
+}
+
+/// One axis-aligned pillar centered at a grid vertex `(vx, vz)`.
+fn push_euclid_pillar(
+    pos: &mut Vec<[f32; 3]>,
+    nor: &mut Vec<[f32; 3]>,
+    col: &mut Vec<[f32; 4]>,
+    idx: &mut Vec<u32>,
+    vx: f32,
+    vz: f32,
+) {
+    let (hw, ph) = (PILLAR_RADIUS, PILLAR_HEIGHT);
+    let (x0, x1, z0, z1) = (vx - hw, vx + hw, vz - hw, vz + hw);
+    push_quad(pos, nor, col, idx,
+        [Vec3::new(x1,0.0,z0),Vec3::new(x1,0.0,z1),Vec3::new(x1,ph,z1),Vec3::new(x1,ph,z0)], Vec3::X, PILLAR_SIDE);
+    push_quad(pos, nor, col, idx,
+        [Vec3::new(x0,0.0,z1),Vec3::new(x0,0.0,z0),Vec3::new(x0,ph,z0),Vec3::new(x0,ph,z1)], -Vec3::X, PILLAR_SIDE);
+    push_quad(pos, nor, col, idx,
+        [Vec3::new(x1,0.0,z1),Vec3::new(x0,0.0,z1),Vec3::new(x0,ph,z1),Vec3::new(x1,ph,z1)], Vec3::Z, PILLAR_SIDE_DARK);
+    push_quad(pos, nor, col, idx,
+        [Vec3::new(x0,0.0,z0),Vec3::new(x1,0.0,z0),Vec3::new(x1,ph,z0),Vec3::new(x0,ph,z0)], -Vec3::Z, PILLAR_SIDE_DARK);
+    push_quad(pos, nor, col, idx,
+        [Vec3::new(x0,ph,z0),Vec3::new(x0,ph,z1),Vec3::new(x1,ph,z1),Vec3::new(x1,ph,z0)], Vec3::Y, PILLAR_CAP);
+}
+
 /// Build the flat Euclidean grid world (floor + pillars) as one normal mesh.
 pub fn build_euclidean_mesh() -> Mesh {
-    let floor_a = [0.09, 0.34, 0.55, 1.0];
-    let floor_b = [0.80, 0.74, 0.55, 1.0];
-    let side = [0.55, 0.38, 0.30, 1.0];
-    let side_dark = [0.40, 0.27, 0.21, 1.0];
-    let cap = [0.95, 0.75, 0.45, 1.0];
-
     let (mut pos, mut nor, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let hw = PILLAR_RADIUS; // reuse pillar footprint
-    let ph = PILLAR_HEIGHT;
 
+    // Floor tiles, centered on integer coordinates.
     for i in -GRID_RADIUS..=GRID_RADIUS {
         for j in -GRID_RADIUS..=GRID_RADIUS {
-            let (x, z) = (i as f32, j as f32);
-            let even = (i + j).rem_euclid(2) == 0;
-
-            // Floor tile (unit square, normal up).
-            let color = if even { floor_a } else { floor_b };
-            push_quad(
-                &mut pos,
-                &mut nor,
-                &mut col,
-                &mut idx,
-                [
-                    Vec3::new(x - 0.5, 0.0, z - 0.5),
-                    Vec3::new(x - 0.5, 0.0, z + 0.5),
-                    Vec3::new(x + 0.5, 0.0, z + 0.5),
-                    Vec3::new(x + 0.5, 0.0, z - 0.5),
-                ],
-                Vec3::Y,
-                color,
-            );
-
-            // Pillar on even tiles (skip the origin where the player spawns).
-            if even && !(i == 0 && j == 0) {
-                let (x0, x1, z0, z1) = (x - hw, x + hw, z - hw, z + hw);
-                // +x and -x walls, +z and -z walls.
-                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
-                    [Vec3::new(x1,0.0,z0),Vec3::new(x1,0.0,z1),Vec3::new(x1,ph,z1),Vec3::new(x1,ph,z0)], Vec3::X, side);
-                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
-                    [Vec3::new(x0,0.0,z1),Vec3::new(x0,0.0,z0),Vec3::new(x0,ph,z0),Vec3::new(x0,ph,z1)], -Vec3::X, side);
-                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
-                    [Vec3::new(x1,0.0,z1),Vec3::new(x0,0.0,z1),Vec3::new(x0,ph,z1),Vec3::new(x1,ph,z1)], Vec3::Z, side_dark);
-                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
-                    [Vec3::new(x0,0.0,z0),Vec3::new(x1,0.0,z0),Vec3::new(x1,ph,z0),Vec3::new(x0,ph,z0)], -Vec3::Z, side_dark);
-                // Cap.
-                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
-                    [Vec3::new(x0,ph,z0),Vec3::new(x0,ph,z1),Vec3::new(x1,ph,z1),Vec3::new(x1,ph,z0)], Vec3::Y, cap);
-            }
+            push_floor_tile(&mut pos, &mut nor, &mut col, &mut idx, i as f32, j as f32);
+        }
+    }
+    // A pillar at every grid vertex (half-integer coordinates) — the analogue of
+    // the hyperbolic vertex pillars, and clear of the integer tile centers.
+    for i in -GRID_RADIUS..GRID_RADIUS {
+        for j in -GRID_RADIUS..GRID_RADIUS {
+            push_euclid_pillar(&mut pos, &mut nor, &mut col, &mut idx, i as f32 + 0.5, j as f32 + 0.5);
         }
     }
 
@@ -274,36 +357,6 @@ pub fn build_euclidean_mesh() -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
     mesh.insert_indices(Indices::U32(idx));
     mesh
-}
-
-/// Add an axis-aligned square pillar standing on tile `m`'s center.
-fn add_pillar(b: &mut MeshBuilder, m: Mat4) {
-    // Base square corners on the floor (y = 0), in the tile's local frame.
-    let base_local: Vec<Vec4> = (0..4)
-        .map(|k| {
-            let a = PI / 4.0 + k as f32 * PI / 2.0;
-            h::floor_point(PILLAR_RADIUS, a)
-        })
-        .collect();
-    let lift = h::boost_y(PILLAR_HEIGHT);
-
-    // World-space base and top rings.
-    let base: Vec<Vec4> = base_local.iter().map(|p| m * *p).collect();
-    let top: Vec<Vec4> = base_local.iter().map(|p| m * (lift * *p)).collect();
-
-    let side = [0.55, 0.38, 0.30, 1.0];
-    let side_dark = [0.40, 0.27, 0.21, 1.0];
-    let cap = [0.95, 0.75, 0.45, 1.0];
-
-    // Four side walls.
-    for k in 0..4 {
-        let n = (k + 1) % 4;
-        let quad = [base[k], base[n], top[n], top[k]];
-        let c = if k % 2 == 0 { side } else { side_dark };
-        b.polygon(&quad, c);
-    }
-    // Top cap.
-    b.polygon(&top, cap);
 }
 
 #[cfg(test)]

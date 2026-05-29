@@ -391,9 +391,9 @@ fn screenshot_then_exit(
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     shot.frame += 1;
-    // Auto-walk forward ~35 units before capturing, to prove that recentering
-    // keeps the floor full far past the baked patch's radius.
-    if shot.frame < 90 {
+    // With HYPER_WALK set, auto-walk forward ~35 units before capturing, to prove
+    // that recentering keeps the floor full far past the baked patch's radius.
+    if shot.frame < 90 && std::env::var("HYPER_WALK").is_ok() {
         player.frame *= h::boost_z(-0.4);
         let fwd = (h::rot_y(player.e_yaw) * Vec4::new(0.0, 0.0, -0.4, 0.0)).truncate();
         player.e_pos += fwd;
