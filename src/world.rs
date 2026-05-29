@@ -162,6 +162,97 @@ pub fn build_world_mesh() -> Mesh {
     b.build()
 }
 
+// ---------------------------------------------------------------------------
+// Euclidean counterpart: an ordinary flat {4,4} grid (four squares per vertex),
+// for the split-screen comparison. Same tile size, colors, and pillar pattern,
+// but drawn with a normal Bevy camera + StandardMaterial so the *only*
+// difference between the two views is the curvature of space.
+// ---------------------------------------------------------------------------
+
+const GRID_RADIUS: i32 = 14;
+
+fn push_quad(
+    pos: &mut Vec<[f32; 3]>,
+    nor: &mut Vec<[f32; 3]>,
+    col: &mut Vec<[f32; 4]>,
+    idx: &mut Vec<u32>,
+    c: [Vec3; 4],
+    n: Vec3,
+    color: [f32; 4],
+) {
+    let base = pos.len() as u32;
+    for v in c {
+        pos.push([v.x, v.y, v.z]);
+        nor.push([n.x, n.y, n.z]);
+        col.push(color);
+    }
+    idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+/// Build the flat Euclidean grid world (floor + pillars) as one normal mesh.
+pub fn build_euclidean_mesh() -> Mesh {
+    let floor_a = [0.09, 0.34, 0.55, 1.0];
+    let floor_b = [0.80, 0.74, 0.55, 1.0];
+    let side = [0.55, 0.38, 0.30, 1.0];
+    let side_dark = [0.40, 0.27, 0.21, 1.0];
+    let cap = [0.95, 0.75, 0.45, 1.0];
+
+    let (mut pos, mut nor, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let hw = PILLAR_RADIUS; // reuse pillar footprint
+    let ph = PILLAR_HEIGHT;
+
+    for i in -GRID_RADIUS..=GRID_RADIUS {
+        for j in -GRID_RADIUS..=GRID_RADIUS {
+            let (x, z) = (i as f32, j as f32);
+            let even = (i + j).rem_euclid(2) == 0;
+
+            // Floor tile (unit square, normal up).
+            let color = if even { floor_a } else { floor_b };
+            push_quad(
+                &mut pos,
+                &mut nor,
+                &mut col,
+                &mut idx,
+                [
+                    Vec3::new(x - 0.5, 0.0, z - 0.5),
+                    Vec3::new(x - 0.5, 0.0, z + 0.5),
+                    Vec3::new(x + 0.5, 0.0, z + 0.5),
+                    Vec3::new(x + 0.5, 0.0, z - 0.5),
+                ],
+                Vec3::Y,
+                color,
+            );
+
+            // Pillar on even tiles (skip the origin where the player spawns).
+            if even && !(i == 0 && j == 0) {
+                let (x0, x1, z0, z1) = (x - hw, x + hw, z - hw, z + hw);
+                // +x and -x walls, +z and -z walls.
+                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
+                    [Vec3::new(x1,0.0,z0),Vec3::new(x1,0.0,z1),Vec3::new(x1,ph,z1),Vec3::new(x1,ph,z0)], Vec3::X, side);
+                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
+                    [Vec3::new(x0,0.0,z1),Vec3::new(x0,0.0,z0),Vec3::new(x0,ph,z0),Vec3::new(x0,ph,z1)], -Vec3::X, side);
+                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
+                    [Vec3::new(x1,0.0,z1),Vec3::new(x0,0.0,z1),Vec3::new(x0,ph,z1),Vec3::new(x1,ph,z1)], Vec3::Z, side_dark);
+                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
+                    [Vec3::new(x0,0.0,z0),Vec3::new(x1,0.0,z0),Vec3::new(x1,ph,z0),Vec3::new(x0,ph,z0)], -Vec3::Z, side_dark);
+                // Cap.
+                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
+                    [Vec3::new(x0,ph,z0),Vec3::new(x0,ph,z1),Vec3::new(x1,ph,z1),Vec3::new(x1,ph,z0)], Vec3::Y, cap);
+            }
+        }
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    mesh.insert_indices(Indices::U32(idx));
+    mesh
+}
+
 /// Add an axis-aligned square pillar standing on tile `m`'s center.
 fn add_pillar(b: &mut MeshBuilder, m: Mat4) {
     // Base square corners on the floor (y = 0), in the tile's local frame.

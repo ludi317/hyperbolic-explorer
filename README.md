@@ -6,11 +6,19 @@ every vertex, which is impossible in flat space and only fits because the floor
 is negatively curved. Pillars rise from the tiles so you can feel the geometry
 through parallax.
 
+The screen is **split**: the left half is hyperbolic space, the right half is an
+ordinary flat Euclidean grid (`{4,4}`, four tiles per vertex). The same controls
+drive both worlds at once, so identical walks visibly diverge — the horizon
+stays close on the left and recedes to infinity on the right, and square loops
+that close in flat space don't close in hyperbolic space.
+
 Inspired by [HackerPoet's HyperEngine](https://github.com/HackerPoet/HyperEngine)
 (the non-Euclidean backend of *Hyperbolica*), reimplemented from scratch in Rust
 + Bevy with a custom WGSL projection shader.
 
 ![screenshot](docs/screenshot.png)
+
+*Left: hyperbolic `{4,5}`. Right: Euclidean `{4,4}`. Same walk, both views.*
 
 ## Run
 
@@ -48,7 +56,13 @@ is a 4-vector `p = (x, y, z, w)` on the upper sheet of
   fundamental tile across its edges (a breadth-first walk over the {4,5} reflection
   group) and baking every tile's hyperboloid coordinates into one mesh. Vertex
   positions store the spatial part `(x, y, z)`; the shader recovers
-  `w = √(1 + x²+y²+z²)`.
+  `w = √(1 + x²+y²+z²)`. The same file builds the flat `{4,4}` grid for the
+  Euclidean half.
+- **The split screen** is two cameras separated by render layers, each filling
+  half the window. The hyperbolic mesh + its camera live on layer 0; the
+  Euclidean grid (a normal mesh with `StandardMaterial`) + its camera on layer 1.
+  One `player_input` system gathers the controls and steps both worlds as
+  independent simulations, which is why they drift apart over a loop.
 - **The projection** ([`assets/shaders/hyper.wgsl`](assets/shaders/hyper.wgsl)) is
   the elegant part. Transform a point into the camera frame with the Lorentz view
   matrix, then do an ordinary pinhole divide by the forward axis. Because the
