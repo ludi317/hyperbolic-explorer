@@ -63,14 +63,6 @@ is a 4-vector `p = (x, y, z, w)` on the upper sheet of
   Euclidean grid (a normal mesh with `StandardMaterial`) + its camera on layer 1.
   One `player_input` system gathers the controls and steps both worlds as
   independent simulations, which is why they drift apart over a loop.
-- **Endless walking on a finite mesh.** Hyperbolic tile count grows
-  *exponentially* with radius, so the floor can only be baked out to a finite
-  patch (~460 tiles). To keep walking from ever reaching an edge, each frame the
-  player is *recentered*: when they leave the central tile, their frame is
-  left-multiplied by a tiling symmetry (a 2-fold rotation about the crossed edge)
-  that snaps them one tile back toward the origin. Because that symmetry leaves
-  the tiling invariant, it's visually seamless — the patch always surrounds you.
-  The Euclidean half does the analogous thing by wrapping into its repeating cell.
 - **The projection** ([`assets/shaders/hyper.wgsl`](assets/shaders/hyper.wgsl)) is
   the elegant part. Transform a point into the camera frame with the Lorentz view
   matrix, then do an ordinary pinhole divide by the forward axis. Because the

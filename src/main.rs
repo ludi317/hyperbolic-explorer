@@ -53,11 +53,6 @@ struct Player {
 #[derive(Resource)]
 struct WorldMaterial(Handle<HyperMaterial>);
 
-/// The four tiling symmetries used to snap the player back into the center tile
-/// so the finite baked patch always surrounds them (endless walking).
-#[derive(Resource)]
-struct Recenter(Vec<Mat4>);
-
 /// Camera markers.
 #[derive(Component)]
 struct HyperCam;
@@ -90,16 +85,8 @@ fn main() {
         e_yaw: 0.0,
         pitch: -0.5,
     })
-    .insert_resource(Recenter(world::recenter_generators()))
     .add_systems(Startup, (setup, grab_cursor))
-    .add_systems(
-        Update,
-        (
-            (player_input, recenter, update_views).chain(),
-            update_viewports,
-            quit_on_esc,
-        ),
-    );
+    .add_systems(Update, (player_input, update_views, update_viewports, quit_on_esc));
 
     if let Ok(path) = std::env::var("HYPER_SCREENSHOT") {
         app.insert_resource(ShotState { path, frame: 0 })
@@ -288,34 +275,6 @@ fn player_input(
     player.e_pos.y = EYE_HEIGHT;
 }
 
-/// Keep both worlds permanently centered on the player so walking never reaches
-/// an edge. Hyperbolic: snap back by tiling symmetries. Euclidean: wrap into the
-/// repeating 2×2 cell of the checker/pillar pattern. Both are seamless.
-fn recenter(mut player: ResMut<Player>, gens: Res<Recenter>) {
-    // Hyperbolic: greedily apply the symmetry that most reduces the player's
-    // distance from the origin (w = cosh(distance)), until none helps.
-    for _ in 0..1000 {
-        let cur = (player.frame * h::origin()).w;
-        let mut best = cur;
-        let mut best_g: Option<Mat4> = None;
-        for g in &gens.0 {
-            let w = (*g * player.frame * h::origin()).w;
-            if w < best - 1e-4 {
-                best = w;
-                best_g = Some(*g);
-            }
-        }
-        match best_g {
-            Some(g) => player.frame = g * player.frame,
-            None => break,
-        }
-    }
-
-    // Euclidean: the pattern repeats every 2 units, so wrap into [-1, 1]².
-    player.e_pos.x -= 2.0 * (player.e_pos.x / 2.0).round();
-    player.e_pos.z -= 2.0 * (player.e_pos.z / 2.0).round();
-}
-
 fn update_views(
     player: Res<Player>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -386,18 +345,10 @@ fn quit_on_esc(keys: Res<ButtonInput<KeyCode>>, mut exit: EventWriter<AppExit>) 
 fn screenshot_then_exit(
     mut commands: Commands,
     mut shot: ResMut<ShotState>,
-    mut player: ResMut<Player>,
     mut exit: EventWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     shot.frame += 1;
-    // With HYPER_WALK set, auto-walk forward ~35 units before capturing, to prove
-    // that recentering keeps the floor full far past the baked patch's radius.
-    if shot.frame < 90 && std::env::var("HYPER_WALK").is_ok() {
-        player.frame *= h::boost_z(-0.4);
-        let fwd = (h::rot_y(player.e_yaw) * Vec4::new(0.0, 0.0, -0.4, 0.0)).truncate();
-        player.e_pos += fwd;
-    }
     if shot.frame == 90 {
         let path = shot.path.clone();
         commands
