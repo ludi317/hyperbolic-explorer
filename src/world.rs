@@ -32,7 +32,7 @@ const PILLAR_RADIUS: f32 = 0.14;
 
 /// Fraction of a tile (toward its center) kept as colored fill; the rest is the
 /// dark border "grout" that outlines every tile.
-const TILE_INSET: f32 = 0.82;
+const TILE_INSET: f32 = 0.93;
 /// Border / grout color.
 const GROUT: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
 
