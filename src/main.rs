@@ -336,9 +336,25 @@ fn update_viewports(
     }
 }
 
-fn quit_on_esc(keys: Res<ButtonInput<KeyCode>>, mut exit: EventWriter<AppExit>) {
-    if keys.just_pressed(KeyCode::Escape) {
+fn quit_on_esc(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut exit: EventWriter<AppExit>,
+    mut quitting: Local<bool>,
+) {
+    // Release the pointer grab a frame *before* exiting. Quitting while the
+    // cursor is Locked + hidden leaves macOS with the mouse captured and no
+    // visible pointer, which looks like the whole OS has frozen.
+    if *quitting {
         exit.send(AppExit::Success);
+        return;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        if let Ok(mut window) = windows.get_single_mut() {
+            window.cursor_options.grab_mode = CursorGrabMode::None;
+            window.cursor_options.visible = true;
+        }
+        *quitting = true;
     }
 }
 
