@@ -30,12 +30,6 @@ const PILLAR_HEIGHT: f32 = 0.9;
 /// Half-size (circumradius) of a pillar's square cross-section.
 const PILLAR_RADIUS: f32 = 0.14;
 
-/// Fraction of a tile (toward its center) kept as colored fill; the rest is the
-/// dark border "grout" that outlines every tile.
-const TILE_INSET: f32 = 0.93;
-/// Border / grout color.
-const GROUT: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
-
 /// Floor colors, indexed by the per-tile graph-coloring. Five entries is enough
 /// for any greedy coloring of this degree-4 graph; in practice only 3–4 are used.
 const FLOOR_PALETTE: [[f32; 4]; 5] = [
@@ -167,16 +161,6 @@ impl MeshBuilder {
         }
     }
 
-    /// Draw a polygon with a dark border: a `border`-colored ring between the
-    /// `outer` and `inner` rings, then the `inner` polygon in `fill`.
-    fn bordered(&mut self, outer: &[Vec4], inner: &[Vec4], fill: [f32; 4], border: [f32; 4]) {
-        let n = outer.len();
-        for k in 0..n {
-            let m = (k + 1) % n;
-            self.polygon(&[outer[k], outer[m], inner[m], inner[k]], border);
-        }
-        self.polygon(inner, fill);
-    }
 
     fn build(self) -> Mesh {
         let mut mesh = Mesh::new(
@@ -202,21 +186,16 @@ pub fn build_world_mesh() -> Mesh {
     info!("floor uses {} colors (proper graph-coloring)", ncolors);
 
     for (m, ring, color) in &tiles {
-        // Outer corners at the circumradius; inner corners pulled toward the
-        // tile center to leave room for the border.
-        let corner = |r: f32| -> Vec<Vec4> {
-            (0..P)
-                .map(|k| {
-                    let a = PI / P as f32 + k as f32 * 2.0 * PI / P as f32;
-                    *m * h::floor_point(r, a)
-                })
-                .collect()
-        };
-        let outer = corner(circumradius);
-        let inner = corner(circumradius * TILE_INSET);
+        // Corners of the regular P-gon, at the circumradius.
+        let corners: Vec<Vec4> = (0..P)
+            .map(|k| {
+                let a = PI / P as f32 + k as f32 * 2.0 * PI / P as f32;
+                *m * h::floor_point(circumradius, a)
+            })
+            .collect();
 
         let base = FLOOR_PALETTE[*color % FLOOR_PALETTE.len()];
-        b.bordered(&outer, &inner, base, GROUT);
+        b.polygon(&corners, base);
 
         // Put a pillar on every other tile so the world has vertical structure
         // and parallax without becoming a forest. Skip the origin tile so the
@@ -273,28 +252,22 @@ pub fn build_euclidean_mesh() -> Mesh {
             let (x, z) = (i as f32, j as f32);
             let even = (i + j).rem_euclid(2) == 0;
 
-            // Floor tile (unit square, normal up) with a dark border ring.
+            // Floor tile (unit square, normal up).
             let color = if even { floor_a } else { floor_b };
-            let o = 0.5; // outer half-size
-            let n = 0.5 * TILE_INSET; // inner half-size
-            let outer = [
-                Vec3::new(x - o, 0.0, z - o),
-                Vec3::new(x - o, 0.0, z + o),
-                Vec3::new(x + o, 0.0, z + o),
-                Vec3::new(x + o, 0.0, z - o),
-            ];
-            let inner = [
-                Vec3::new(x - n, 0.0, z - n),
-                Vec3::new(x - n, 0.0, z + n),
-                Vec3::new(x + n, 0.0, z + n),
-                Vec3::new(x + n, 0.0, z - n),
-            ];
-            for k in 0..4 {
-                let m = (k + 1) % 4;
-                push_quad(&mut pos, &mut nor, &mut col, &mut idx,
-                    [outer[k], outer[m], inner[m], inner[k]], Vec3::Y, GROUT);
-            }
-            push_quad(&mut pos, &mut nor, &mut col, &mut idx, inner, Vec3::Y, color);
+            push_quad(
+                &mut pos,
+                &mut nor,
+                &mut col,
+                &mut idx,
+                [
+                    Vec3::new(x - 0.5, 0.0, z - 0.5),
+                    Vec3::new(x - 0.5, 0.0, z + 0.5),
+                    Vec3::new(x + 0.5, 0.0, z + 0.5),
+                    Vec3::new(x + 0.5, 0.0, z - 0.5),
+                ],
+                Vec3::Y,
+                color,
+            );
 
             // Pillar on even tiles (skip the origin where the player spawns).
             if even && !(i == 0 && j == 0) {
