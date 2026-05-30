@@ -36,6 +36,16 @@ const TILE_INSET: f32 = 0.93;
 /// Border / grout color.
 const GROUT: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
 
+/// Floor colors, indexed by the per-tile graph-coloring. Five entries is enough
+/// for any greedy coloring of this degree-4 graph; in practice only 3–4 are used.
+const FLOOR_PALETTE: [[f32; 4]; 5] = [
+    [0.13, 0.42, 0.60, 1.0], // blue
+    [0.82, 0.74, 0.52, 1.0], // tan
+    [0.34, 0.55, 0.40, 1.0], // sage green
+    [0.72, 0.44, 0.34, 1.0], // terracotta
+    [0.46, 0.38, 0.56, 1.0], // plum
+];
+
 /// Inradius (center → edge midpoint) and circumradius (center → vertex) of a
 /// regular {P,Q} tile, from the right-triangle relations of the (2,P,Q) triangle.
 fn tile_radii() -> (f32, f32) {
@@ -48,50 +58,84 @@ fn tile_radii() -> (f32, f32) {
     (inradius, circumradius)
 }
 
-/// All the tile transforms (Lorentz matrices mapping the fundamental tile to
-/// each tile), discovered by reflecting across tile edges. Each returned value
-/// is `(transform, ring)` where `ring` is the BFS depth (used for coloring).
-fn generate_tiles() -> Vec<(Mat4, u32)> {
+/// The four edge-reflection generators of the {P,Q} tiling. The neighbor of a
+/// tile `m` across its k-th edge is the tile `m * generators[k]`.
+fn edge_generators() -> Vec<Mat4> {
     let (inradius, _) = tile_radii();
-
     // Reflection across the tile edge whose midpoint is distance `inradius`
     // along +x: translate the edge to the origin plane, flip x, translate back.
     let reflect_edge0 = h::boost_x(inradius) * h::reflect_x() * h::boost_x(-inradius);
-    // The four edge reflections, one per side of the square.
-    let generators: Vec<Mat4> = (0..P)
+    (0..P)
         .map(|k| {
             let a = k as f32 * 2.0 * PI / P as f32;
             h::rot_y(a) * reflect_edge0 * h::rot_y(-a)
         })
-        .collect();
+        .collect()
+}
 
-    let mut tiles = vec![(Mat4::IDENTITY, 0u32)];
-    let mut seen: Vec<Vec3> = vec![Vec3::ZERO];
-    let mut queue: VecDeque<(Mat4, u32)> = VecDeque::new();
-    queue.push_back((Mat4::IDENTITY, 0));
+/// All tiles, discovered by reflecting across edges, then *properly* colored by
+/// greedy graph-coloring over the edge-adjacency graph: each tile gets the
+/// lowest color index not used by any already-colored edge-neighbor. Because
+/// every vertex is surrounded by an odd (5-) cycle of tiles, the tiling is not
+/// 2-colorable; this naturally settles into 3–4 colors. Returns
+/// `(transform, ring, color)` per tile (ring is the BFS depth, used for pillars).
+fn generate_tiles() -> Vec<(Mat4, u32, usize)> {
+    let generators = edge_generators();
 
-    let is_new = |seen: &Vec<Vec3>, c: Vec3| !seen.iter().any(|s| s.distance_squared(c) < 1e-4);
+    // Breadth-first discovery of tile transforms.
+    let mut mats = vec![Mat4::IDENTITY];
+    let mut rings = vec![0u32];
+    let mut centers = vec![Vec3::ZERO];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    queue.push_back(0);
 
-    while let Some((m, ring)) = queue.pop_front() {
-        if tiles.len() >= MAX_TILES {
+    let find = |centers: &Vec<Vec3>, c: Vec3| {
+        centers.iter().position(|s| s.distance_squared(c) < 1e-4)
+    };
+
+    while let Some(idx) = queue.pop_front() {
+        if mats.len() >= MAX_TILES {
             break;
         }
+        let (m, ring) = (mats[idx], rings[idx]);
         for g in &generators {
-            let m2 = m * *g;
-            let center = m2 * h::origin();
+            let center = m * *g * h::origin();
             // Geodesic distance from the world origin is acosh(w).
             if center.w.acosh() > MAX_DIST {
                 continue;
             }
             let c3 = center.truncate();
-            if is_new(&seen, c3) {
-                seen.push(c3);
-                tiles.push((m2, ring + 1));
-                queue.push_back((m2, ring + 1));
+            if find(&centers, c3).is_none() {
+                let new_idx = mats.len();
+                mats.push(m * *g);
+                rings.push(ring + 1);
+                centers.push(c3);
+                queue.push_back(new_idx);
             }
         }
     }
-    tiles
+
+    // Edge adjacency, then greedy coloring in BFS order.
+    let n = mats.len();
+    let mut colors = vec![usize::MAX; n];
+    for i in 0..n {
+        let mut used = [false; 8];
+        for g in &generators {
+            let c = (mats[i] * *g * h::origin()).truncate();
+            if let Some(j) = find(&centers, c) {
+                if j != i && colors[j] != usize::MAX {
+                    used[colors[j]] = true;
+                }
+            }
+        }
+        let mut c = 0;
+        while used[c] {
+            c += 1;
+        }
+        colors[i] = c;
+    }
+
+    (0..n).map(|i| (mats[i], rings[i], colors[i])).collect()
 }
 
 /// Accumulates triangles whose vertex positions are hyperboloid spatial coords.
@@ -154,11 +198,10 @@ pub fn build_world_mesh() -> Mesh {
 
     let mut b = MeshBuilder::new();
 
-    // Two-tone checkerboard floor; tile shade keyed on BFS-ring parity.
-    let floor_a = [0.09, 0.34, 0.55, 1.0];
-    let floor_b = [0.80, 0.74, 0.55, 1.0];
+    let ncolors = tiles.iter().map(|t| t.2).max().unwrap_or(0) + 1;
+    info!("floor uses {} colors (proper graph-coloring)", ncolors);
 
-    for (m, ring) in &tiles {
+    for (m, ring, color) in &tiles {
         // Outer corners at the circumradius; inner corners pulled toward the
         // tile center to leave room for the border.
         let corner = |r: f32| -> Vec<Vec4> {
@@ -172,7 +215,7 @@ pub fn build_world_mesh() -> Mesh {
         let outer = corner(circumradius);
         let inner = corner(circumradius * TILE_INSET);
 
-        let base = if ring % 2 == 0 { floor_a } else { floor_b };
+        let base = FLOOR_PALETTE[*color % FLOOR_PALETTE.len()];
         b.bordered(&outer, &inner, base, GROUT);
 
         // Put a pillar on every other tile so the world has vertical structure
@@ -351,5 +394,32 @@ mod tests {
                 .count();
             assert_eq!(shared, 2, "edge {k}: expected 2 shared corners, got {shared}");
         }
+    }
+
+    /// The greedy coloring must be proper: no two edge-adjacent tiles share a
+    /// color. Also confirm it uses 3–4 colors (it cannot be 2, since the tiling
+    /// has odd cycles around every vertex).
+    #[test]
+    fn coloring_is_proper() {
+        let tiles = generate_tiles();
+        let generators = edge_generators();
+        let centers: Vec<(Vec3, usize)> = tiles
+            .iter()
+            .map(|(m, _, c)| ((*m * h::origin()).truncate(), *c))
+            .collect();
+
+        for (m, _, c) in &tiles {
+            for g in &generators {
+                let nc = (*m * *g * h::origin()).truncate();
+                if let Some((_, ncolor)) =
+                    centers.iter().find(|(p, _)| p.distance_squared(nc) < 1e-4)
+                {
+                    assert_ne!(*c, *ncolor, "edge-adjacent tiles share a color");
+                }
+            }
+        }
+
+        let used = tiles.iter().map(|t| t.2).max().unwrap() + 1;
+        assert!((3..=4).contains(&used), "expected 3-4 colors, used {used}");
     }
 }
